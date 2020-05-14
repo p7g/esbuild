@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +33,12 @@ type file struct {
 	resolvedImports map[string]uint32
 }
 
+type Loader interface {
+	Extension() string
+	ShouldLoad(filename string) bool
+	Parse(logging.Log, logging.Source, parser.ParseOptions) (ast.AST, bool)
+}
+
 type Bundle struct {
 	fs          fs.FS
 	sources     []logging.Source
@@ -48,65 +52,46 @@ type parseResult struct {
 	ok          bool
 }
 
+func FileExtension(path string) string {
+	if lastDot := strings.LastIndexByte(path, '.'); lastDot >= 0 {
+		return path[lastDot:]
+	}
+	return ""
+}
+
+type JSLoader struct{}
+
+func (self JSLoader) Extension() string {
+	return ".js"
+}
+
+func (self JSLoader) Parse(log logging.Log, source logging.Source, options parser.ParseOptions) (ast.AST, bool) {
+	return parser.Parse(log, source, options)
+}
+
+func (self JSLoader) ShouldLoad(filename string) bool {
+	return FileExtension(filename) == ".js"
+}
+
+func DefaultLoaders() []Loader {
+	return []Loader{
+		JSLoader{},
+	}
+}
+
 func parseFile(
 	log logging.Log, source logging.Source, importSource logging.Source, pathRange ast.Range,
 	parseOptions parser.ParseOptions, bundleOptions BundleOptions, results chan parseResult,
 ) {
 	path := source.AbsolutePath
 
-	// Get the file extension
-	extension := ""
-	if lastDot := strings.LastIndexByte(path, '.'); lastDot >= 0 {
-		extension = path[lastDot:]
-	}
-
 	// Pick the loader based on the file extension
-	loader := bundleOptions.ExtensionToLoader[extension]
+	loader := bundleOptions.FindLoader(path)
 
-	// Special-case reading from stdin
-	if bundleOptions.LoaderForStdin != LoaderNone && source.IsStdin {
-		loader = bundleOptions.LoaderForStdin
-	}
-
-	switch loader {
-	case LoaderJS:
-		ast, ok := parser.Parse(log, source, parseOptions)
+	if loader != nil {
+		ast, ok := loader.Parse(log, source, parseOptions)
 		results <- parseResult{source.Index, ast, ok}
-
-	case LoaderJSX:
-		parseOptions.JSX.Parse = true
-		ast, ok := parser.Parse(log, source, parseOptions)
-		results <- parseResult{source.Index, ast, ok}
-
-	case LoaderTS:
-		parseOptions.TS.Parse = true
-		ast, ok := parser.Parse(log, source, parseOptions)
-		results <- parseResult{source.Index, ast, ok}
-
-	case LoaderTSX:
-		parseOptions.TS.Parse = true
-		parseOptions.JSX.Parse = true
-		ast, ok := parser.Parse(log, source, parseOptions)
-		results <- parseResult{source.Index, ast, ok}
-
-	case LoaderJSON:
-		expr, ok := parser.ParseJSON(log, source, parser.ParseJSONOptions{})
-		ast := parser.ModuleExportsAST(log, source, parseOptions, expr)
-		results <- parseResult{source.Index, ast, ok}
-
-	case LoaderText:
-		expr := ast.Expr{ast.Loc{0}, &ast.EString{lexer.StringToUTF16(source.Contents)}}
-		ast := parser.ModuleExportsAST(log, source, parseOptions, expr)
-		results <- parseResult{source.Index, ast, true}
-
-	case LoaderBase64:
-		encoded := base64.StdEncoding.EncodeToString([]byte(source.Contents))
-		expr := ast.Expr{ast.Loc{0}, &ast.EString{lexer.StringToUTF16(encoded)}}
-		ast := parser.ModuleExportsAST(log, source, parseOptions, expr)
-		results <- parseResult{source.Index, ast, true}
-
-	default:
-		log.AddRangeError(importSource, pathRange, fmt.Sprintf("File extension not supported: %s", path))
+	} else {
 		results <- parseResult{}
 	}
 }
@@ -121,8 +106,8 @@ func ScanBundle(
 	results := make(chan parseResult)
 	remaining := 0
 
-	if bundleOptions.ExtensionToLoader == nil {
-		bundleOptions.ExtensionToLoader = DefaultExtensionToLoaderMap()
+	if bundleOptions.Loaders == nil {
+		bundleOptions.Loaders = DefaultLoaders()
 	}
 
 	// Always start by parsing the runtime file
@@ -161,35 +146,22 @@ func ScanBundle(
 		sourceIndex, ok := visited[path]
 		if !ok {
 			sourceIndex = uint32(len(sources))
-			isStdin := bundleOptions.LoaderForStdin != LoaderNone && flags.isEntryPoint
-			prettyPath := path
-			if !isStdin {
-				prettyPath = res.PrettyPath(path)
-				visited[path] = sourceIndex
-			}
+			prettyPath := res.PrettyPath(path)
+			visited[path] = sourceIndex
 			contents := ""
 
 			// Disabled files are left empty
 			if !flags.isDisabled {
-				if isStdin {
-					bytes, err := ioutil.ReadAll(os.Stdin)
-					if err != nil {
-						log.AddRangeError(importSource, pathRange, fmt.Sprintf("Could not read from stdin: %s", err.Error()))
-						return 0, false
-					}
-					contents = string(bytes)
-				} else {
-					contents, ok = res.Read(path)
-					if !ok {
-						log.AddRangeError(importSource, pathRange, fmt.Sprintf("Could not read from file: %s", path))
-						return 0, false
-					}
+				contents, ok = res.Read(path)
+				if !ok {
+					log.AddRangeError(importSource, pathRange, fmt.Sprintf("Could not read from file: %s", path))
+					return 0, false
 				}
 			}
 
 			source := logging.Source{
 				Index:        sourceIndex,
-				IsStdin:      isStdin,
+				IsStdin:      false,
 				AbsolutePath: path,
 				PrettyPath:   prettyPath,
 				Contents:     contents,
@@ -242,32 +214,6 @@ func ScanBundle(
 	return Bundle{fs, sources, files, entryPoints}
 }
 
-type Loader int
-
-const (
-	LoaderNone Loader = iota
-	LoaderJS
-	LoaderJSX
-	LoaderTS
-	LoaderTSX
-	LoaderJSON
-	LoaderText
-	LoaderBase64
-)
-
-func DefaultExtensionToLoaderMap() map[string]Loader {
-	return map[string]Loader{
-		".js":   LoaderJS,
-		".mjs":  LoaderJS,
-		".cjs":  LoaderJS,
-		".jsx":  LoaderJSX,
-		".ts":   LoaderTS,
-		".tsx":  LoaderTSX,
-		".json": LoaderJSON,
-		".txt":  LoaderText,
-	}
-}
-
 type Format uint8
 
 const (
@@ -310,17 +256,22 @@ type BundleOptions struct {
 	MangleSyntax      bool
 	SourceMap         bool
 	ModuleName        string
-	ExtensionToLoader map[string]Loader
+	Loaders           []Loader
 	OutputFormat      Format
-
-	// If this isn't LoaderNone, all entry point contents are assumed to come
-	// from stdin and must be loaded with this loader
-	LoaderForStdin Loader
 
 	// If true, make sure to generate a single file that can be written to stdout
 	WriteToStdout bool
 
 	omitRuntimeForTests bool
+}
+
+func (b *BundleOptions) FindLoader(filename string) Loader {
+	for _, loader := range b.Loaders {
+		if loader.ShouldLoad(filename) {
+			return loader
+		}
+	}
+	return nil
 }
 
 type BundleResult struct {
@@ -1398,8 +1349,8 @@ func (b *Bundle) computeModuleGroups(
 }
 
 func (b *Bundle) Compile(log logging.Log, options BundleOptions) []BundleResult {
-	if options.ExtensionToLoader == nil {
-		options.ExtensionToLoader = DefaultExtensionToLoaderMap()
+	if options.Loaders == nil {
+		options.Loaders = DefaultLoaders()
 	}
 
 	if options.OutputFormat == FormatNone {
@@ -1729,8 +1680,8 @@ func (b *Bundle) outputFileForEntryPoint(entryPoint uint32, options *BundleOptio
 	name := b.fs.Base(b.sources[entryPoint].AbsolutePath)
 
 	// Strip known file extensions
-	for ext, _ := range options.ExtensionToLoader {
-		if strings.HasSuffix(name, ext) {
+	for _, loader := range options.Loaders {
+		if ext := loader.Extension(); strings.HasSuffix(name, ext) {
 			name = name[:len(name)-len(ext)]
 			break
 		}

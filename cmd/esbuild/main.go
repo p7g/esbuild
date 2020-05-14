@@ -138,24 +138,7 @@ func (args *argsObject) parseDefine(key string, value string) bool {
 }
 
 func (args *argsObject) parseLoader(text string) bundler.Loader {
-	switch text {
-	case "js":
-		return bundler.LoaderJS
-	case "jsx":
-		return bundler.LoaderJSX
-	case "ts":
-		return bundler.LoaderTS
-	case "tsx":
-		return bundler.LoaderTSX
-	case "json":
-		return bundler.LoaderJSON
-	case "text":
-		return bundler.LoaderText
-	case "base64":
-		return bundler.LoaderBase64
-	default:
-		return bundler.LoaderNone
-	}
+	return bundler.JSLoader{}
 }
 
 func (args *argsObject) parseMemberExpression(text string) ([]string, bool) {
@@ -176,7 +159,7 @@ func parseArgs(fs fs.FS, rawArgs []string) (argsObject, error) {
 			Defines: make(map[string]parser.DefineFunc),
 		},
 		bundleOptions: bundler.BundleOptions{
-			ExtensionToLoader: bundler.DefaultExtensionToLoaderMap(),
+			Loaders: bundler.DefaultLoaders(),
 		},
 		resolveOptions: resolver.ResolveOptions{
 			ExtensionOrder:  []string{".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".js", ".json"},
@@ -252,35 +235,6 @@ func parseArgs(fs fs.FS, rawArgs []string) (argsObject, error) {
 			}
 			if !args.parseDefine(text[:equals], text[equals+1:]) {
 				return argsObject{}, fmt.Errorf("Invalid define: %s", arg)
-			}
-
-		case strings.HasPrefix(arg, "--loader:"):
-			text := arg[len("--loader:"):]
-			equals := strings.IndexByte(text, '=')
-			if equals == -1 {
-				return argsObject{}, fmt.Errorf("Missing \"=\": %s", arg)
-			}
-			extension, loader := text[:equals], text[equals+1:]
-			if !strings.HasPrefix(extension, ".") {
-				return argsObject{}, fmt.Errorf("File extension must start with \".\": %s", arg)
-			}
-			if len(extension) < 2 || strings.ContainsRune(extension[1:], '.') {
-				return argsObject{}, fmt.Errorf("Invalid file extension: %s", arg)
-			}
-			parsedLoader := args.parseLoader(loader)
-			if parsedLoader == bundler.LoaderNone {
-				return argsObject{}, fmt.Errorf("Invalid loader: %s", arg)
-			} else {
-				args.bundleOptions.ExtensionToLoader[extension] = parsedLoader
-			}
-
-		case strings.HasPrefix(arg, "--loader="):
-			loader := arg[len("--loader="):]
-			parsedLoader := args.parseLoader(loader)
-			if parsedLoader == bundler.LoaderNone {
-				return argsObject{}, fmt.Errorf("Invalid loader: %s", arg)
-			} else {
-				args.bundleOptions.LoaderForStdin = parsedLoader
 			}
 
 		case strings.HasPrefix(arg, "--target="):
@@ -396,11 +350,6 @@ func parseArgs(fs fs.FS, rawArgs []string) (argsObject, error) {
 	}
 
 	if len(args.entryPaths) > 0 {
-		// Disallow the "--loader=" form when not reading from stdin
-		if args.bundleOptions.LoaderForStdin != bundler.LoaderNone {
-			return argsObject{}, fmt.Errorf("Must provide file extension for --loader")
-		}
-
 		// Write to stdout by default if there's only one input file
 		if len(args.entryPaths) == 1 && args.bundleOptions.AbsOutputFile == "" && args.bundleOptions.AbsOutputDir == "" {
 			args.bundleOptions.WriteToStdout = true
@@ -408,11 +357,6 @@ func parseArgs(fs fs.FS, rawArgs []string) (argsObject, error) {
 	} else if !logging.GetTerminalInfo(os.Stdin).IsTTY {
 		// If called with no input files and we're not a TTY, read from stdin instead
 		args.entryPaths = append(args.entryPaths, "<stdin>")
-
-		// Default to reading JavaScript from stdin
-		if args.bundleOptions.LoaderForStdin == bundler.LoaderNone {
-			args.bundleOptions.LoaderForStdin = bundler.LoaderJS
-		}
 
 		// Write to stdout if no input file is provided
 		if args.bundleOptions.AbsOutputFile == "" {

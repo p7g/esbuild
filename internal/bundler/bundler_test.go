@@ -4,7 +4,10 @@ import (
 	"path"
 	"testing"
 
+	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/fs"
+	"github.com/evanw/esbuild/internal/lexer"
+	"github.com/evanw/esbuild/internal/loader"
 	"github.com/evanw/esbuild/internal/logging"
 	"github.com/evanw/esbuild/internal/parser"
 	"github.com/evanw/esbuild/internal/resolver"
@@ -947,8 +950,8 @@ func TestJSXSyntaxInJSWithJSXLoader(t *testing.T) {
 		bundleOptions: BundleOptions{
 			IsBundling:    true,
 			AbsOutputFile: "/out.js",
-			ExtensionToLoader: map[string]Loader{
-				".js": LoaderJSX,
+			Loaders: []loader.Loader{
+				loader.JSXLoader{},
 			},
 		},
 		expected: map[string]string{
@@ -2339,6 +2342,21 @@ func TestRequireTxt(t *testing.T) {
 	})
 }
 
+type CustomLoader struct{}
+
+func (self CustomLoader) Extension() string {
+	return ".custom"
+}
+
+func (self CustomLoader) ShouldLoad(filename string) bool {
+	return loader.FileExtension(filename) == ".custom"
+}
+
+func (self CustomLoader) Parse(log logging.Log, source logging.Source, options parser.ParseOptions) (ast.AST, bool) {
+	expr := ast.Expr{ast.Loc{0}, &ast.EString{lexer.StringToUTF16(source.Contents)}}
+	return parser.ModuleExportsAST(log, source, options, expr), true
+}
+
 func TestRequireCustomExtensionString(t *testing.T) {
 	expectBundled(t, bundled{
 		files: map[string]string{
@@ -2354,9 +2372,9 @@ func TestRequireCustomExtensionString(t *testing.T) {
 		bundleOptions: BundleOptions{
 			IsBundling:    true,
 			AbsOutputFile: "/out.js",
-			ExtensionToLoader: map[string]Loader{
-				".js":     LoaderJS,
-				".custom": LoaderText,
+			Loaders: []loader.Loader{
+				loader.JSLoader{},
+				CustomLoader{},
 			},
 		},
 		expected: map[string]string{
@@ -2391,9 +2409,9 @@ func TestRequireCustomExtensionBase64(t *testing.T) {
 		bundleOptions: BundleOptions{
 			IsBundling:    true,
 			AbsOutputFile: "/out.js",
-			ExtensionToLoader: map[string]Loader{
-				".js":     LoaderJS,
-				".custom": LoaderBase64,
+			Loaders: []loader.Loader{
+				loader.JSLoader{},
+				CustomLoader{},
 			},
 		},
 		expected: map[string]string{

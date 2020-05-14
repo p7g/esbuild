@@ -11,6 +11,7 @@ import (
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/lexer"
+	"github.com/evanw/esbuild/internal/loader"
 	"github.com/evanw/esbuild/internal/logging"
 	"github.com/evanw/esbuild/internal/parser"
 	"github.com/evanw/esbuild/internal/printer"
@@ -33,12 +34,6 @@ type file struct {
 	resolvedImports map[string]uint32
 }
 
-type Loader interface {
-	Extension() string
-	ShouldLoad(filename string) bool
-	Parse(logging.Log, logging.Source, parser.ParseOptions) (ast.AST, bool)
-}
-
 type Bundle struct {
 	fs          fs.FS
 	sources     []logging.Source
@@ -50,33 +45,6 @@ type parseResult struct {
 	sourceIndex uint32
 	ast         ast.AST
 	ok          bool
-}
-
-func FileExtension(path string) string {
-	if lastDot := strings.LastIndexByte(path, '.'); lastDot >= 0 {
-		return path[lastDot:]
-	}
-	return ""
-}
-
-type JSLoader struct{}
-
-func (self JSLoader) Extension() string {
-	return ".js"
-}
-
-func (self JSLoader) Parse(log logging.Log, source logging.Source, options parser.ParseOptions) (ast.AST, bool) {
-	return parser.Parse(log, source, options)
-}
-
-func (self JSLoader) ShouldLoad(filename string) bool {
-	return FileExtension(filename) == ".js"
-}
-
-func DefaultLoaders() []Loader {
-	return []Loader{
-		JSLoader{},
-	}
 }
 
 func parseFile(
@@ -92,6 +60,7 @@ func parseFile(
 		ast, ok := loader.Parse(log, source, parseOptions)
 		results <- parseResult{source.Index, ast, ok}
 	} else {
+		log.AddRangeError(importSource, pathRange, fmt.Sprintf("File extension not supported: %s", path))
 		results <- parseResult{}
 	}
 }
@@ -107,7 +76,7 @@ func ScanBundle(
 	remaining := 0
 
 	if bundleOptions.Loaders == nil {
-		bundleOptions.Loaders = DefaultLoaders()
+		bundleOptions.Loaders = loader.DefaultLoaders()
 	}
 
 	// Always start by parsing the runtime file
@@ -256,7 +225,7 @@ type BundleOptions struct {
 	MangleSyntax      bool
 	SourceMap         bool
 	ModuleName        string
-	Loaders           []Loader
+	Loaders           []loader.Loader
 	OutputFormat      Format
 
 	// If true, make sure to generate a single file that can be written to stdout
@@ -265,7 +234,7 @@ type BundleOptions struct {
 	omitRuntimeForTests bool
 }
 
-func (b *BundleOptions) FindLoader(filename string) Loader {
+func (b *BundleOptions) FindLoader(filename string) loader.Loader {
 	for _, loader := range b.Loaders {
 		if loader.ShouldLoad(filename) {
 			return loader
@@ -1350,7 +1319,7 @@ func (b *Bundle) computeModuleGroups(
 
 func (b *Bundle) Compile(log logging.Log, options BundleOptions) []BundleResult {
 	if options.Loaders == nil {
-		options.Loaders = DefaultLoaders()
+		options.Loaders = loader.DefaultLoaders()
 	}
 
 	if options.OutputFormat == FormatNone {

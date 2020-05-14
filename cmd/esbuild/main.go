@@ -14,6 +14,7 @@ import (
 	"github.com/evanw/esbuild/internal/bundler"
 	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/lexer"
+	"github.com/evanw/esbuild/internal/loader"
 	"github.com/evanw/esbuild/internal/logging"
 	"github.com/evanw/esbuild/internal/parser"
 	"github.com/evanw/esbuild/internal/resolver"
@@ -137,10 +138,6 @@ func (args *argsObject) parseDefine(key string, value string) bool {
 	return true
 }
 
-func (args *argsObject) parseLoader(text string) bundler.Loader {
-	return bundler.JSLoader{}
-}
-
 func (args *argsObject) parseMemberExpression(text string) ([]string, bool) {
 	parts := strings.Split(text, ".")
 
@@ -159,7 +156,7 @@ func parseArgs(fs fs.FS, rawArgs []string) (argsObject, error) {
 			Defines: make(map[string]parser.DefineFunc),
 		},
 		bundleOptions: bundler.BundleOptions{
-			Loaders: bundler.DefaultLoaders(),
+			Loaders: loader.DefaultLoaders(),
 		},
 		resolveOptions: resolver.ResolveOptions{
 			ExtensionOrder:  []string{".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".js", ".json"},
